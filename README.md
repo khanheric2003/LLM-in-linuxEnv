@@ -1,3 +1,4 @@
+# LLM-in-linuxEnv
 AI-Powered Linux Coding Assistant (sort of like Devin)
 This project features an LLM (Large Language Model) that interacts with a simulated Linux environment. It can:
 - Execute code within the environment.
@@ -12,5 +13,5 @@ Instruction of use:
 - npx tsx server/server.ts for server set up
 - npm run dev for frontend run
 Prototype picture
-![alt text](prototype_caption1.png)
-# LLM-in-linuxEnv
+![alt text](image.png)
+

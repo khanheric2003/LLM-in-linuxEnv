@@ -6,6 +6,13 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import dotenv from 'dotenv';
 
+
+// langchain
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import { PromptTemplate } from "@langchain/core/prompts";
+import { RunnableSequence } from "@langchain/core/runnables";
+import { StringOutputParser } from "@langchain/core/output_parsers";
+
 // Load environment variables from .env file
 dotenv.config();
 
@@ -294,10 +301,17 @@ app.post('/api/fs/ask', async (req: Request, res: Response) => {
     }
   });
 
-app.post('/api/fs/code', async (req: Request, res: Response) => {
+  app.post('/api/fs/code', async (req: Request, res: Response) => {
     try {
       const { language, description, directory } = req.body;
-      const result = await handleCodeCommand(language, description, directory);
+      // Remove the hyphen from language if present
+      const cleanLanguage = language.replace(/^-/, '');
+      
+      // console.log('Language:', cleanLanguage);
+      // console.log('Description:', description);
+      // console.log('Directory:', directory);
+  
+      const result = await handleCodeCommand(cleanLanguage, description, directory);
       res.json(result);
     } catch (error) {
       console.error('Code execution error:', error);
@@ -306,75 +320,208 @@ app.post('/api/fs/code', async (req: Request, res: Response) => {
       });
     }
   });
-//   seperate from command
-async function handleCodeCommand(language: string, description: string, currentDirectory: string) {
-    const API_KEY = process.env.GEMINI_API_KEY;
-    const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
   
-    const prompt = `Create a ${language} program that does: ${description}
-  Please respond ONLY with code in this exact format:
-  FILENAME: [filename]
-  CODE:
-  \`\`\`${language}
-  [your code here]
-  \`\`\`
-  EXECUTE: [command to run the code]
-  
-  Do not include any explanations or additional text.`;
-  
-    const response = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: prompt
-          }]
-        }],
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 800,
-        }
-      })
+  async function handleCodeCommand(language: string, description: string, currentDirectory: string) {
+    const model = new ChatGoogleGenerativeAI({
+      apiKey: process.env.GEMINI_API_KEY!,
+      modelName: "gemini-pro",
+      maxOutputTokens: 2048,
+      temperature: 0.3
     });
   
-    const data = await response.json();
-    const answer = data.candidates[0].content.parts[0].text;
+    // Create structured prompts using LangChain
+    const systemPrompt = PromptTemplate.fromTemplate(`
+      You are an expert {language} programmer who writes clean, efficient, and well-documented code.
+      You always include necessary imports and handle errors appropriately.
+      Current environment:
+      - Linux-based system
+      - Python 3 for Python code
+      - Node.js for JavaScript/TypeScript
+      - All standard libraries available
+    `);
   
-    // Extract filename, code, and execute command
-    const filenameMatch = answer.match(/FILENAME: (.+)/);
-    const codeMatch = answer.match(/```[\w\n]+([\s\S]+?)```/);
-    const executeMatch = answer.match(/EXECUTE: (.+)/);
+    const taskPrompt = PromptTemplate.fromTemplate(`
+      Create a {language} program that does the following: {description}
+      
+      Follow these steps:
+      1. Analyze required libraries and imports
+      2. Plan the code structure
+      3. Implement with proper error handling
+      4. Test for completeness
+      
+      Your response MUST be in this exact format:
+      FILENAME: [filename with extension]
+      CODE:
+      '''{language}
+      [complete code with imports]
+      '''
+      EXECUTE: [command to run the code]
+    `);
   
-    if (!filenameMatch || !codeMatch || !executeMatch) {
-      throw new Error('Invalid response format from API');
-    }
+    const languageGuidelines = {
+      python: `
+        Required practices for Python:
+        - Use proper import statements at the top
+        - Include error handling with try/except
+        - Use type hints where appropriate
+        - Follow PEP 8 style guide
+        - Use proper string formatting (f-strings)
+        - Handle file operations safely
+      `,
+      javascript: `
+        Required practices for JavaScript:
+        - Use proper import/require statements
+        - Include error handling with try/catch
+        - Use async/await for async operations
+        - Follow ESLint standards
+        - Use proper string templates
+        - Handle promises appropriately
+      `,
+      typescript: `
+        Required practices for TypeScript:
+        - Use proper import statements
+        - Include type definitions
+        - Use interfaces where appropriate
+        - Include error handling with try/catch
+        - Follow TSLint standards
+        - Use async/await for async operations
+      `
+    };
   
-    const filename = filenameMatch[1].trim();
-    const code = codeMatch[1].trim();
-    const executeCommand = executeMatch[1].trim();
+    const executeAndHandleErrors = async (code: string, filename: string, executeCommand: string) => {
+      const filePath = path.join(BASE_PATH, currentDirectory, filename);
+      fs.writeFileSync(filePath, code);
+      
+      try {
+        const { stdout, stderr } = await execAsync(executeCommand, {
+          cwd: path.join(BASE_PATH, currentDirectory)
+        });
+        return { success: true, output: stderr ? `Warning: ${stderr}\nOutput: ${stdout}` : stdout };
+      } catch (error) {
+        return { 
+          success: false, 
+          error: error instanceof Error ? error.message : "Unknown error",
+          code
+        };
+      }
+    };
   
-    // Create the file
-    const filePath = path.join(BASE_PATH, currentDirectory, filename);
-    fs.writeFileSync(filePath, code);
+    const fixCode = async (code: string, error: string) => {
+      console.log("\nRethinking and fixing the code due to error...");
+      const fixPrompt = `
+      The following code has an error:
+      
+      CODE:
+      ${code}
+      
+      ERROR:
+      ${error}
+      
+      Please provide the corrected code in exactly this format:
+      FILENAME: [same filename]
+      CODE:
+      \`\`\`${language}
+      [corrected code with ALL necessary imports]
+      \`\`\`
+      EXECUTE: [command to run the code]
   
-    // Execute the file
+      Ensure ALL imports are included at the top and the code is complete.`;
+  
+      try {
+        const result = await model.invoke(fixPrompt);
+        return result.text;
+      } catch (error) {
+        throw new Error("Failed to fix code: " + error);
+      }
+    };
+  
+    const chain = RunnableSequence.from([
+      {
+        system: systemPrompt,
+        task: taskPrompt,
+        guidelines: () => languageGuidelines[language as keyof typeof languageGuidelines] || ""
+      },
+      {
+        system: (input) => input.system.format({ language }),
+        task: (input) => input.task.format({ language, description }),
+        guidelines: (input) => input.guidelines
+      },
+      (formattedPrompts) => `
+        ${formattedPrompts.system}
+        
+        ${formattedPrompts.guidelines}
+        
+        Task: ${formattedPrompts.task}
+      `,
+      model,
+      new StringOutputParser()
+    ]);
+  
     try {
-      const { stdout, stderr } = await execAsync(executeCommand, {
-        cwd: path.join(BASE_PATH, currentDirectory)
-      });
+      console.log("Generating initial code...");
+      const result = await chain.invoke({});
+      console.log("Raw LLM response:", result);
   
-      return {
-        filename,
-        code,
-        output: stderr ? `Warning: ${stderr}\nOutput: ${stdout}` : stdout
-      };
+      let filenameMatch = result.match(/FILENAME: (.+)/);
+      let codeMatch = result.match(/```[\w\n]+([\s\S]+?)```/);
+      let executeMatch = result.match(/EXECUTE: (.+)/);
+  
+      if (!filenameMatch || !codeMatch || !executeMatch) {
+        throw new Error("Invalid response format from LLM");
+      }
+  
+      let filename = filenameMatch[1].trim();
+      let code = codeMatch[1].trim();
+      let executeCommand = executeMatch[1].trim();
+      
+      // Execute and handle errors with retries
+      let maxRetries = 3;
+      let attempt = 0;
+      
+      while (attempt < maxRetries) {
+        console.log(`\nAttempt ${attempt + 1} of ${maxRetries}`);
+        const result = await executeAndHandleErrors(code, filename, executeCommand);
+        
+        if (result.success) {
+          return {
+            filename,
+            code,
+            output: result.output
+          };
+        }
+        
+        console.log(`\nError detected in attempt ${attempt + 1}:`, result.error);
+        
+        // Try to fix the code
+        const fixedResponse = await fixCode(code, result.error);
+        console.log("Got fixed code response:", fixedResponse);
+        
+        // Parse fixed code
+        const newFilenameMatch = fixedResponse.match(/FILENAME: (.+)/);
+        const newCodeMatch = fixedResponse.match(/```[\w\n]+([\s\S]+?)```/);
+        const newExecuteMatch = fixedResponse.match(/EXECUTE: (.+)/);
+        
+        if (!newFilenameMatch || !newCodeMatch || !newExecuteMatch) {
+          throw new Error("Invalid fixed code format from LLM");
+        }
+        
+        code = newCodeMatch[1].trim();
+        executeCommand = newExecuteMatch[1].trim();
+        attempt++;
+        
+        if (attempt < maxRetries) {
+          console.log("\nTrying with fixed code...");
+        }
+      }
+      
+      throw new Error("Maximum retry attempts reached. Could not fix the code.");
     } catch (error) {
-      throw new Error(`Execution error: ${error}`);
+      console.error("Code generation error:", error);
+      throw error;
     }
   }
+  
+  export { handleCodeCommand };
 
   async function executeFile(filePath: string, type: string): Promise<string> {
     const commands: { [key: string]: string } = {

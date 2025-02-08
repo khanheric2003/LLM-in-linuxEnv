@@ -6,7 +6,13 @@ interface AskResponse {
   executionResult?: string;
   filename?: string;
 }
-
+interface PythonExecutionResponse {
+  output: string;
+  error?: string;
+  exitCode: number;
+  waitingForInput: boolean;
+  processId?: string; 
+}
 class FileSystem {
   async listDirectory(path: string = '.'): Promise<string> {
     try {
@@ -140,6 +146,29 @@ class FileSystem {
       throw error;
     }
   }
+  async executePythonFile(
+    filename: string,
+    currentDirectory: string,
+    input?: string
+  ): Promise<{ output: string; error?: string; fixed?: boolean }> {
+    try {
+      const response = await axios.post('/api/fs/python', {
+        filename,
+        directory: currentDirectory,
+        input
+      });
+      
+      return {
+        output: response.data.output,
+        error: response.data.error,
+        fixed: response.data.fixed
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new Error(error.response?.data?.error || 'Failed to execute Python file');
+      }
+      throw error;
+    }
+  }
 }
-
 export const fileSystem = new FileSystem();

@@ -1,10 +1,17 @@
 import { fileSystem } from './fileSystem';
-import { processLLMCommand } from './llmIntegration';
+// import { processLLMCommand } from './llmIntegration';
 
 interface CommandResult {
   output?: string;
   newDirectory?: string;
+  awaitingInput?: boolean;
+  context?: {
+    command: string;
+    file: string;
+    previousOutput: string;
+  };
 }
+
 
 export const executeCommand = async (command: string, currentDirectory: string): Promise<CommandResult> => {
   const args = command.trim().split(/\s+/);
@@ -97,6 +104,35 @@ export const executeCommand = async (command: string, currentDirectory: string):
         }
         return { output: text };
 
+
+        case 'python':
+          if (args.length < 2) {
+            return { output: 'python: missing file operand' };
+          }
+          const pythonFile = args[1];
+          try {
+            const input = args.slice(2).join(' ');
+            console.log('Executing Python file:', { pythonFile, input });
+            
+            const response = await fileSystem.executePythonFile(pythonFile, currentDirectory, input);
+            
+            let output = response.output;
+            if (response.error) {
+              output = `Error: ${response.error}`;
+            }
+            if (response.fixed) {
+              output = `Code was automatically fixed and executed successfully.\n\n${output}`;
+            }
+        
+            return {
+              output,
+              awaitingInput: false
+            };
+          } catch (error) {
+            return { 
+              output: `python: error executing '${pythonFile}': ${error instanceof Error ? error.message : 'Unknown error'}`
+            };
+          }
       case 'help':
         return {
           output: `Available commands:
@@ -111,8 +147,10 @@ export const executeCommand = async (command: string, currentDirectory: string):
   echo [text] > [file] - Write text to file
   clear - Clear terminal
   ask [question] - Ask the LLM a question
-  code [language] [description] - Generate and execute code`
-        };
+  code [language] [description] - Generate and execute code
+  python [file] - Execute a Python file`
+
+  };
 
       case 'clear':
         return {};
